@@ -1,0 +1,213 @@
+VLAN=0
+#
+Proxy_Count=100
+# 
+USER_PORT="NTL_"
+#
+FIRST_PORT=10001
+#
+PASS=1
+#
+IP4=$(curl -4 -s icanhazip.com)
+
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+random() {
+	tr </dev/urandom -dc A-Za-z0-9 | head -c5
+	echo
+}
+
+array=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
+gen64() {
+	ip64() {
+		echo "${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}"
+	}
+	echo "$1:$(ip64):$(ip64):$(ip64):$(ip64)"
+}
+LowjiProxy() {
+    cd /root
+sleep 1
+    URL="https://github.com/nguyendollhp/Nguyendoll/raw/main/Proxy.gz"
+    wget -qO- $URL | bsdtar -xvf-
+sleep 1
+    cd /root/LowjiProxy
+sleep 2
+    make -f Makefile.Linux
+    mkdir -p /usr/local/etc/LowjiConfig/{bin,logs,stat}
+    cp src/3proxy /usr/local/etc/LowjiConfig/bin/
+sleep 5
+    cd $WORKDIR
+}
+
+download_proxy() {
+echo "$PASS" > "${WORKDIR}/pass.txt"
+echo "$IP4" > "${WORKDIR}/ip.txt"
+echo "$IP6" > "${WORKDIR}/ip6.txt"
+echo "hoàn tất"  > /root/log.txt
+rm -rf /root/LowjiProxy
+}
+gen_proxy() {
+    cat <<EOF
+daemon
+maxconn 2000
+nserver 1.1.1.1
+nserver 8.8.4.4
+nserver 2001:4860:4860::8888
+nserver 2001:4860:4860::8844
+nscache 65536
+timeouts 1 5 30 60 180 1800 15 60
+setgid 65535
+setuid 65535
+stacksize 6291456 
+flush
+auth strong
+
+users $(awk -F "/" 'BEGIN{ORS="";} {print $1 ":CL:" $2 " "}' ${WORKDATA})
+
+
+$(awk -F "/" -v PASS="$PASS" '{
+    auth = (PASS == 1 || $3 == $5) ? "strong" : "none";
+    proxy_type = ($3 != $5) ? "-6" : "-4" ;
+    print "auth " auth;
+    print "allow  " $1;
+    print "proxy " proxy_type " -n -a -p" $4 " -i" $3 " -e" $5;
+    print "flush";
+}' ${WORKDATA})
+EOF
+}
+
+gen_proxy_file_for_user() {
+cat > /root/proxy.txt <<EOF
+$(awk -F "/" -v LAST_PORT="$LAST_PORT" -v PASS="$PASS" '{
+    if ($4 <= LAST_PORT) {
+		print $3 ":" $4 ":" $1 ":" $2
+    } else {
+        print $3 ":" $4 ":" $1 ":" $2 > "/root/ip4.txt";    # Ghi dòng vào ip4.txt
+    }
+}' ${WORKDATA})
+EOF
+}
+
+
+gen_data() {
+    unique_ipv6_list=()  # Mảng để lưu trữ các giá trị IPv6 duy nhất
+
+    seq $FIRST_PORT $LAST_PORT | while read port; do
+        ipv6="$(gen64 $IP6)"
+        while [[ " ${unique_ipv6_list[@]} " =~ " $ipv6 " ]]; do
+            ipv6="$(gen64 $IP6)"
+        done
+        unique_ipv6_list+=("$ipv6")
+
+        echo "${USER_PORT}${port}/$(random)/$IP4/$port/$ipv6"
+    done
+	V4Port=$((LAST_PORT + 1))
+	echo "${USER_PORT}${V4Port}/$(random)/$IP4/$V4Port/$IP4"
+}
+
+gen_iptables() {
+    cat <<EOF
+    $(awk -F "/" '{print "iptables -I INPUT -p tcp --dport " $4 "  -m state --state NEW -j ACCEPT"}' ${WORKDATA}) 
+EOF
+}
+
+gen_ifconfig() {
+    cat <<EOF
+$(awk -F "/" -v Eth="${Eth}" '{print "ifconfig " Eth " inet6 add " $5 "/64"}' ${WORKDATA} | sed '$d')
+EOF
+}
+echo "installing net-tools"  > /root/log.txt
+yum -y install wget gcc net-tools bsdtar zip >/dev/null
+
+cat << EOF > /etc/rc.d/rc.local
+#!/bin/bash
+touch /var/lock/subsys/local
+EOF
+
+echo "working folder = /home/Lowji194"
+WORKDIR="/home/Lowji194"
+WORKDATA="${WORKDIR}/data.txt"
+mkdir $WORKDIR && cd $_
+
+LowjiProxy #call Install LowjiProxy
+
+Eth=$(ip addr show | grep -E '^2:' | sed 's/^[0-9]*: \(.*\):.*/\1/')
+IP6=$(curl -6 -s icanhazip.com | cut -f1-4 -d':')
+
+echo "Internal ip = ${IP4}. IPv6 = ${IP6}. Enether = ${Eth}"
+
+LAST_PORT=$(($FIRST_PORT + (Proxy_Count - 1)))
+echo "LAST_PORT is $LAST_PORT. Continue..."
+
+echo "Tạo data Proxy"  > /root/log.txt
+gen_data >$WORKDIR/data.txt
+
+echo "Cấu hình iptables"  > /root/log.txt
+gen_iptables >$WORKDIR/boot_iptables.sh
+
+echo "Cấu hình ifconfig"  > /root/log.txt
+gen_ifconfig >$WORKDIR/boot_ifconfig.sh
+chmod +x boot_*.sh /etc/rc.local
+
+echo "KT VLAN"
+if [ "$VLAN" -eq 1 ]; then
+echo "Đang tạo Proxy từ Mạng LAN"  > /root/log.txt
+    curl -sO https://raw.githubusercontent.com/nguyendollhp/Nguyendoll/main/VLAN.sh -P "${WORKDIR}"
+chmod 0755 ${WORKDIR}/VLAN.sh
+sed -i 's/\r$//' ${WORKDIR}/VLAN.sh
+fi
+
+echo "Config Proxy cfg"  > /root/log.txt
+gen_proxy >/usr/local/etc/LowjiConfig/UserProxy.cfg
+mv /usr/local/etc/LowjiConfig/bin/3proxy /usr/local/etc/LowjiConfig/bin/StartProxy
+
+echo "Boot Proxy"  > /root/log.txt
+cat >/etc/rc.local <<EOF
+#!/bin/bash
+touch /var/lock/subsys/local
+EOF
+
+echo "Boot VLAN"   > /root/log.txt
+if [ "$VLAN" -eq 1 ]; then
+    echo "bash ${WORKDIR}/VLAN.sh" >> /etc/rc.local
+fi
+
+cat >>/etc/rc.local <<EOF
+echo "Boot Services Proxy"
+
+startProxy() {
+  ulimit -n 1000048
+  /usr/local/etc/LowjiConfig/bin/StartProxy /usr/local/etc/LowjiConfig/UserProxy.cfg
+}
+
+bash ${WORKDIR}/boot_iptables.sh
+bash ${WORKDIR}/boot_ifconfig.sh 2>/dev/null
+
+echo "Start Proxy Services"
+startProxy
+
+# Vòng lặp kiểm tra StartProxy đã khởi động hay chưa
+while true; do
+  if pgrep StartProxy >/dev/null; then
+    echo "StartProxy đã hoạt động."
+    break  # Thoát khỏi vòng lặp nếu StartProxy đã khởi động
+  else
+    echo "StartProxy chưa hoạt động, thử khởi động lại..."
+    startProxy
+    sleep 5  # Chờ 5 giây trước khi kiểm tra lại
+  fi
+done
+
+echo "Boot Services Proxy Complete"
+EOF
+
+chmod 0755 /etc/rc.local
+
+echo "Start Proxy Services" > /root/log.txt
+bash /etc/rc.local
+
+echo "Xuất Proxy" > /root/log.txt
+gen_proxy_file_for_user
+
+download_proxy
